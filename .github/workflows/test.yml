@@ -1,50 +1,68 @@
-name: build_deploy_aks
+name: Build and Push to GKE verba backend
 
 on:
   push:
-    paths:
-      - main1
+    branches:
+      - main
 
 jobs:
-  build:
+  continuous-integration:
     runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    steps:      
+      - uses: actions/checkout@v3
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/123123123/locations/global/workloadIdentityPools/the-workload-pool/providers/the-provider
+          service_account: only-storage-object-adm@<PROJECT_ID>.iam.gserviceaccount.com
+      - uses: RafikFarhad/push-to-gcr-github-action@v5-rc1
+        with:
+          # gcloud_service_key: ${{ secrets.GCLOUD_SERVICE_KEY }} # can be base64 encoded or plain text || not needed if you use google-github-actions/auth
+          registry: gcr.io #same no change
+          project_id: my-awesome-project 
+          image_name: gpt_backend
+          image_tag: latest,v1
+          dockerfile: Dockerfile
+          context: ./docker
+  
+  continuous_deployment:
+    name: continuous delivery to GKE cluster
+    runs-on: ubuntu-latest
+    needs: continuous-integration
+    environment: production
     steps:
-      - name: Checkout source code 
-        uses: actions/checkout@v3
-      - name: ACR build
-        id: build-push-acr
-        uses: azure/acr-build@v1
-        with:
-          service_principal: gpt-app-test
-          service_principal_password: 5Am8Q~azXCojZL2yP3RIINDE3tKc1eaNvIRl8cK2
-          tenant: c2c7577c-0754-49cc-8fa5-ee89ab7910e3
-          registry: ${{ secrets.REGISTRY }}
-          repository: ${{ secrets.REPOSITORY }}
-          image:  pdfchat_backend
-          folder: backend/app
-          branch: main
-          tag: kube4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Azure login
-        id: login
-        uses: azure/login@v1.4.3
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v2'
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - name: Set AKS context
-        id: set-context
-        uses: azure/aks-set-context@v3
+          credentials_json: '${{ secrets.GCLOUD_SERVICE_KEY }}'
+
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v2'
+
+      - id: 'get-credentials'
+        uses: 'google-github-actions/get-gke-credentials@v2'
         with:
-          resource-group: '${{ secrets.resource_group }}' 
-          cluster-name: '${{ secrets.cluster_name }}'
-      - name: Setup kubectl
-        id: install-kubectl
-        uses: azure/setup-kubectl@v3
-      - name: Deploy to AKS
-        id: deploy-aks
-        uses: Azure/k8s-deploy@v4
-        with:
-          namespace: 'gptapp-backend'
-          manifests: |
-            ${{ secrets.yml_file_location }}
-          images: '${{ secrets.registry }}.azurecr.io/${{ secrets.repository }}/pdfchat_backend:kube4'
-          pull-images: false
+          cluster_name: 'cluster-1'
+          location: 'us-central1-c'
+
+      - name: "install kubernetes"
+        run: |
+          curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+          pwd
+
+      - name: Deploy
+        run: |
+          sed 's|hyd\.ocir\.io\.docker|hyd.ocir.io/axbnvq6zalfd/pdfchatregistry/verba_backend:${{ github.sha }} |g' k8s/pdfchat-worker.yml > k8s/pdfchat-worker-temp.yml
+          rm -rf k8s/verba-worker.yml
+          mv k8s/verba-worker-temp.yml k8s/verba-worker.yml
+          kubectl apply -f k8s -n verba-backend
+          kubectl get pods -n verba-backend
